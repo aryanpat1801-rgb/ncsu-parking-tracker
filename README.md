@@ -1,8 +1,11 @@
 # Spring Hill Parking Tracker
 
 Logs how many spaces are free in NC State's Spring Hill Park and Ride (and the
-other nine lots, for free) every 5 minutes, and plots the result so you can pick
-the times of day that are actually worth driving in.
+other nine lots, for free), and plots the result so you can pick the times of
+day that are actually worth driving in.
+
+Locally it samples **every 5 minutes** whenever the machine is awake; the cloud
+collector fills the gaps **every 10 minutes, 7am–5pm on weekdays**.
 
 Data comes from the public JSON endpoint behind the "Parking Availability" table
 on <https://transportation.ncsu.edu/> — the same live feed the OnCampus app shows.
@@ -34,8 +37,9 @@ more reliable samples whenever the machine happens to be awake.
 
 ## Always-on collection via GitHub Actions
 
-Collects **every 10 minutes, 7am–5pm campus time**, on GitHub's machines — so it
-keeps logging while the laptop is off. Works fine on a **private** repo.
+Collects **every 10 minutes, 7am–5pm campus time, weekdays only**, on GitHub's
+machines — so it keeps logging while the laptop is off. Daylight saving is
+handled automatically. Works fine on a **private** repo.
 
 1. Create an empty repo at <https://github.com/new>. Do **not** add a README,
    `.gitignore`, or licence — this folder already has its own history.
@@ -56,26 +60,46 @@ keeps logging while the laptop is off. Works fine on a **private** repo.
    private repo is fine: it reuses the git credentials you already have, so no
    access token is ever stored in `config.json`.
 
-### Daylight saving
+### Daylight saving is handled automatically
 
-GitHub cron is **always UTC and has no DST support**, so the 7am–5pm window is
-written in UTC and has to be moved twice a year in `collect-parking.yml`:
+GitHub cron is **always UTC with no DST support**, so no single cron expression
+can mean "7am–5pm campus time" year-round. Instead the workflow schedules the
+**union** of both windows — `*/10 11-21 * * 1-5`, i.e. 11:00–21:59 UTC, which
+covers 7am–5pm ET under both EDT and EST — and `in_window.py` decides at
+runtime whether each firing is genuinely in-window.
 
-| Period | Cron |
-|---|---|
-| EDT, roughly Mar–Nov | `*/10 11-20 * * *` ← currently active |
-| EST, roughly Nov–Mar | `*/10 12-21 * * *` |
+`zoneinfo` carries the real DST rules, so this is correct through the
+2026-11-01 transition and every one after it, with **nothing to edit**. Verify
+it yourself any time:
 
-Forget, and you quietly collect 6am–4pm instead. The local Task Scheduler
-collector is immune — it runs in real local time.
+```bash
+python in_window.py --check     # 14 pinned cases, incl. both 2026/2027 flips
+```
+
+To change the hours, edit `START_HOUR` / `END_HOUR` in `in_window.py`. Only
+widen the *cron* if you go outside 7am–5pm, since the cron is the outer bound.
 
 ### Actions minutes
 
-60 runs/day ≈ **1,860 minutes/month** against the 2,000-minute free tier for
-private repos. That fits, but with only ~7% headroom, because GitHub bills each
-run rounded **up to a full minute** even though a poll takes seconds. If you
-ever raise the frequency, either drop weekends (`*/10 11-20 * * 1-5`, about
-1,320/month) or make the repo public, where Actions is unlimited and free.
+Weekdays only, so the worst case is a month with 22 weekdays:
+
+| | Runs billed | Actually collect |
+|---|---|---|
+| Sep 2026 (EDT) | 1,452 | 1,320 |
+| Nov 2026 (DST flips) | 1,386 | 1,260 |
+| Jan 2027 (EST) | 1,386 | 1,260 |
+
+Against the 2,000-minute free tier for private repos, that leaves ~27% headroom.
+
+Two things drive those numbers. GitHub bills each run rounded **up to a full
+minute** even though a poll takes seconds. And ~132 runs/month fire but skip
+immediately — the hour of the union window that is out-of-window under the
+current offset. Those skipped runs still cost a billed minute each; that is the
+price of automatic DST, and it is cheaper than the alternative of splitting the
+guard into its own job (which would bill a second minute on every *real* run).
+
+Public repos get unlimited free Actions, so none of this applies if you make the
+repo public.
 
 ### Cron reliability
 
@@ -117,6 +141,7 @@ python collect.py --import-url URL     # merge the cloud collector's CSV
 | `collect.py` | command-line collector, stdlib only |
 | `parking_core.py` | fetching, SQLite storage, import/export |
 | `analysis.py` | time-of-day binning and weekday averaging |
+| `in_window.py` | decides EDT vs EST for the cloud collector (`--check` self-tests) |
 | `data/parking.db` | the SQLite store (all lots, all history) |
 | `Register-Task.ps1` | registers the 5-minute Windows task |
 | `Log-Parking.ps1` | the original CSV logger, superseded by `collect.py` |

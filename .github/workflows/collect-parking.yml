@@ -4,17 +4,17 @@ name: Collect parking data
 
 on:
   schedule:
-    # Every 10 minutes, 7am-5pm campus time only.
+    # Target: every 10 minutes, 7am-5pm campus time, weekdays only.
     #
-    # GitHub cron is ALWAYS UTC and has no daylight-saving support, so this
-    # window is written in UTC and has to be moved twice a year:
+    # GitHub cron is ALWAYS UTC with no daylight-saving support, so no single
+    # expression can express that year-round. This schedules the UNION of both
+    # windows (11:00-21:59 UTC covers 7am-5pm ET in both EDT and EST) and lets
+    # in_window.py decide at runtime which of those runs is really in-window.
+    # That stays correct through every future DST transition with no edit.
     #
-    #   EDT (Mar-Nov, UTC-4)  7am-5pm ET  ->  "*/10 11-20 * * *"   <-- active
-    #   EST (Nov-Mar, UTC-5)  7am-5pm ET  ->  "*/10 12-21 * * *"
-    #
-    # Leave the wrong one in place and you collect 6am-4pm instead. The local
-    # Task Scheduler collector is unaffected -- it runs in real local time.
-    - cron: "*/10 11-20 * * *"
+    # The window never crosses local midnight, so a UTC weekday here is always
+    # the same calendar weekday on campus -- 1-5 really does mean Mon-Fri ET.
+    - cron: "*/10 11-21 * * 1-5"
   workflow_dispatch:
 
 permissions:
@@ -31,15 +31,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Runs on the runner's preinstalled python3; decides EDT vs EST for us.
+      - name: Is the collection window open on campus?
+        id: window
+        run: python3 in_window.py
+
       - uses: actions/setup-python@v5
+        if: steps.window.outputs.collect == 'true'
         with:
           python-version: "3.12"
 
       # collect.py is stdlib-only, so there is nothing to pip install.
       - name: Poll the parking endpoint
+        if: steps.window.outputs.collect == 'true'
         run: python collect.py --csv data/cloud-log.csv
 
       - name: Commit the new sample
+        if: steps.window.outputs.collect == 'true'
         run: |
           git config user.name  "parking-collector"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
