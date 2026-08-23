@@ -13,6 +13,7 @@ import csv
 import datetime as dt
 import json
 import sqlite3
+import subprocess
 import urllib.request
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -192,6 +193,59 @@ def export_csv(conn: sqlite3.Connection, path: Path, location=None) -> int:
                         local.strftime("%A"), r["location"], r["free"],
                         r["total"], r["occupancy"]])
     return len(rows)
+
+
+CLOUD_CSV = DATA_DIR / "cloud-log.csv"
+
+
+def sync_via_git(conn: sqlite3.Connection, repo_dir: Path = ROOT):
+    """Pull the cloud collector's commits, then merge its CSV in.
+
+    This is the sync path for a PRIVATE repo: it reuses whatever git
+    credentials the machine already has, so no access token has to be stored
+    in config.json. Returns (rows added, human-readable message).
+    """
+    def git(*args, timeout=180):
+        try:
+            return subprocess.run(["git", "-C", str(repo_dir), *args],
+                                  capture_output=True, text=True, timeout=timeout)
+        except FileNotFoundError:
+            raise RuntimeError("git is not on PATH")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"git {args[0]} timed out")
+
+    # Checked up front: git's own message for this case is the unhelpful
+    # "set-upstream-to=origin/<branch>" hint, which buries the real problem.
+    if not git("remote", timeout=15).stdout.strip():
+        raise RuntimeError(
+            "No git remote is configured yet. Create the repo on GitHub and "
+            "run:  git remote add origin <url>  &&  git push -u origin main")
+
+    proc = git("pull", "--rebase", "--autostash")
+    if proc.returncode != 0:
+        lines = [l for l in (proc.stderr or proc.stdout).strip().splitlines()
+                 if l.strip() and not l.startswith("hint:")]
+        if any("no tracking information" in l.lower() for l in lines):
+            raise RuntimeError(
+                "This branch has no upstream yet. Run:  "
+                "git push -u origin main")
+        raise RuntimeError(lines[0] if lines else "git pull failed")
+
+    if not CLOUD_CSV.exists():
+        return 0, ("pulled, but data/cloud-log.csv does not exist yet -- "
+                   "has the workflow run at least once?")
+    n = import_csv(conn, CLOUD_CSV)
+    return n, f"pulled and merged {n} new reading(s) from the cloud collector"
+
+
+def sync(conn: sqlite3.Connection):
+    """Dispatch to whichever sync the config asks for."""
+    cfg = load_config()
+    url = (cfg.get("sync_url") or "").strip()
+    if cfg.get("sync_mode", "git") == "url" and url:
+        n = import_url(conn, url)
+        return n, f"merged {n} new reading(s) from {url}"
+    return sync_via_git(conn)
 
 
 def load_config() -> dict:

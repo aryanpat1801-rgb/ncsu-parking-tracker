@@ -34,33 +34,57 @@ more reliable samples whenever the machine happens to be awake.
 
 ## Always-on collection via GitHub Actions
 
-1. Create a repo and push this folder:
+Collects **every 10 minutes, 7am–5pm campus time**, on GitHub's machines — so it
+keeps logging while the laptop is off. Works fine on a **private** repo.
+
+1. Create an empty repo at <https://github.com/new>. Do **not** add a README,
+   `.gitignore`, or licence — this folder already has its own history.
+
+2. Point this folder at it and push:
 
    ```bash
-   git init && git add . && git commit -m "parking tracker"
-   gh repo create ncsu-parking-tracker --private --source=. --push
+   git remote add origin https://github.com/<you>/<repo>.git
+   git push -u origin main
    ```
 
-2. In the repo: **Settings → Actions → General → Workflow permissions** →
-   *Read and write permissions*. Without this the collector cannot commit.
+3. In the repo: **Settings → Actions → General → Workflow permissions** →
+   *Read and write permissions*. Without this the collector cannot commit its
+   samples and every run fails at the last step.
 
-3. It now appends to `data/cloud-log.csv` on GitHub. Copy that file's **raw**
-   URL into `config.json`:
+4. Press **Sync cloud** in the GUI whenever you want the laptop's copy caught
+   up. It runs `git pull` and merges `data/cloud-log.csv` in — which is why a
+   private repo is fine: it reuses the git credentials you already have, so no
+   access token is ever stored in `config.json`.
 
-   ```json
-   { "sync_url": "https://raw.githubusercontent.com/<you>/ncsu-parking-tracker/main/data/cloud-log.csv" }
-   ```
+### Daylight saving
 
-4. Press **Sync cloud** in the GUI to merge every reading taken while the laptop
-   was off. (Private repo? Use a public one, or sync with `git pull` plus
-   `python collect.py --import-csv data/cloud-log.csv`.)
+GitHub cron is **always UTC and has no DST support**, so the 7am–5pm window is
+written in UTC and has to be moved twice a year in `collect-parking.yml`:
 
-Two things to know about Actions cron: runs are **best-effort** and often land
-several minutes late or get skipped under load, so expect roughly 5–15 minute
-spacing rather than a clean 5; and GitHub **disables scheduled workflows after
-60 days of no repo activity**, so push something occasionally or re-enable it in
-the Actions tab. Neither hurts the analysis — every sample carries its own
-timestamp and gaps are handled as missing rather than as zero.
+| Period | Cron |
+|---|---|
+| EDT, roughly Mar–Nov | `*/10 11-20 * * *` ← currently active |
+| EST, roughly Nov–Mar | `*/10 12-21 * * *` |
+
+Forget, and you quietly collect 6am–4pm instead. The local Task Scheduler
+collector is immune — it runs in real local time.
+
+### Actions minutes
+
+60 runs/day ≈ **1,860 minutes/month** against the 2,000-minute free tier for
+private repos. That fits, but with only ~7% headroom, because GitHub bills each
+run rounded **up to a full minute** even though a poll takes seconds. If you
+ever raise the frequency, either drop weekends (`*/10 11-20 * * 1-5`, about
+1,320/month) or make the repo public, where Actions is unlimited and free.
+
+### Cron reliability
+
+Scheduled runs are **best-effort**: they often land several minutes late and can
+be skipped entirely under load, so expect roughly 10–20 minute spacing rather
+than a clean 10. GitHub also **disables scheduled workflows after 60 days of no
+repo activity** — push something occasionally, or re-enable it in the Actions
+tab. Neither hurts the analysis: every sample carries its own timestamp, and
+gaps are treated as missing rather than as zero.
 
 ## The GUI
 

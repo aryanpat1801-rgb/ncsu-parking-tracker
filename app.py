@@ -269,22 +269,28 @@ class App(tk.Tk):
         self.status_var.set("polling...")
 
     def on_sync(self) -> None:
-        url = core.load_config().get("sync_url")
-        if not url:
-            messagebox.showinfo(
-                "No cloud collector configured",
-                "Set \"sync_url\" in config.json to the raw URL of the CSV your "
-                "cloud collector commits, then this button will merge in every "
-                "reading taken while the laptop was off.")
-            return
+        """Pull in everything the cloud collector logged while the laptop was
+        off. Synchronous on purpose: a git pull takes a second or two, and a
+        brief busy cursor is clearer than a silent background task."""
+        self.status_var.set("syncing from the cloud collector...")
+        self.configure(cursor="watch")
+        self.update_idletasks()
         try:
-            n = core.import_url(self.conn, url)
+            n, message = core.sync(self.conn)
         except Exception as exc:
-            messagebox.showerror("Sync failed", str(exc))
+            messagebox.showerror(
+                "Sync failed",
+                f"{exc}\n\nThe cloud collector syncs by pulling this repo. "
+                "Check that a remote is configured (git remote -v) and that "
+                "the workflow has run at least once.")
+            self.status_var.set("sync failed")
             return
-        self.status_var.set(f"synced: {n} new rows from the cloud collector")
-        self.refresh_sources()
-        self.redraw()
+        finally:
+            self.configure(cursor="")
+        self.status_var.set(message)
+        if n:
+            self.refresh_sources()
+            self.redraw()
 
     def on_export(self) -> None:
         path = filedialog.asksaveasfilename(

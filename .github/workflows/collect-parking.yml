@@ -4,10 +4,17 @@ name: Collect parking data
 
 on:
   schedule:
-    # Every 5 minutes. GitHub treats cron as best-effort: runs are often
-    # several minutes late and can be skipped entirely under load, so treat
-    # this as "roughly every 5-15 minutes", not a precise clock.
-    - cron: "*/5 * * * *"
+    # Every 10 minutes, 7am-5pm campus time only.
+    #
+    # GitHub cron is ALWAYS UTC and has no daylight-saving support, so this
+    # window is written in UTC and has to be moved twice a year:
+    #
+    #   EDT (Mar-Nov, UTC-4)  7am-5pm ET  ->  "*/10 11-20 * * *"   <-- active
+    #   EST (Nov-Mar, UTC-5)  7am-5pm ET  ->  "*/10 12-21 * * *"
+    #
+    # Leave the wrong one in place and you collect 6am-4pm instead. The local
+    # Task Scheduler collector is unaffected -- it runs in real local time.
+    - cron: "*/10 11-20 * * *"
   workflow_dispatch:
 
 permissions:
