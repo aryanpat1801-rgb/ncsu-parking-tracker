@@ -1,0 +1,6 @@
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/.sync-download.csv
+__pycache__/
+*.pyc
