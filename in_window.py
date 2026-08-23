@@ -90,8 +90,12 @@ def main(argv=None) -> int:
     if "--check" in argv:
         return _self_test()
 
-    open_now = is_open()
-    print(describe())
+    # A manual "Run workflow" click means "collect a sample now" -- otherwise
+    # testing the workflow outside 7am-5pm on a weekday looks like a pass but
+    # silently collects nothing.
+    forced = os.environ.get("FORCE", "").lower() == "true"
+    open_now = forced or is_open()
+    print(describe() + ("  [FORCED by manual run]" if forced else ""))
     # Consumed by the workflow's step-level `if:` conditions.
     out = os.environ.get("GITHUB_OUTPUT")
     if out:

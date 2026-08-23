@@ -35,6 +35,10 @@ jobs:
       - name: Is the collection window open on campus?
         id: window
         run: python3 in_window.py
+        env:
+          # A manual "Run workflow" click collects regardless of the clock,
+          # so the workflow can be tested outside the window.
+          FORCE: ${{ github.event_name == 'workflow_dispatch' }}
 
       - uses: actions/setup-python@v5
         if: steps.window.outputs.collect == 'true'
