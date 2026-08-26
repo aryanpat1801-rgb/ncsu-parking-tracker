@@ -4,8 +4,9 @@ Logs how many spaces are free in NC State's Spring Hill Park and Ride (and the
 other nine lots, for free), and plots the result so you can pick the times of
 day that are actually worth driving in.
 
-Locally it samples **every 5 minutes** whenever the machine is awake; the cloud
-collector fills the gaps **every 10 minutes, 7am–5pm on weekdays**.
+The cloud collector is the one that matters: **every 10 minutes, 7am–5pm on
+weekdays, whether or not the laptop is on**. The local collectors are a bonus —
+they add denser **5-minute** samples whenever the machine happens to be awake.
 
 Data comes from the public JSON endpoint behind the "Parking Availability" table
 on <https://transportation.ncsu.edu/> — the same live feed the OnCampus app shows.
@@ -26,7 +27,7 @@ so running all three at once is safe and gives the best coverage.
 |---|---|---|
 | **GUI** (`app.py`) | the window is open | just launch it |
 | **Task Scheduler** (`collect.py`) | laptop is on, GUI closed or not | `Register-Task.ps1` |
-| **GitHub Actions** (`collect-parking.yml`) | always, including laptop off | see below |
+| **GitHub Actions** (`cloud_run.py`) | always, including laptop off | see below |
 
 ### Why three
 
@@ -39,7 +40,7 @@ more reliable samples whenever the machine happens to be awake.
 
 Collects **every 10 minutes, 7am–5pm campus time, weekdays only**, on GitHub's
 machines — so it keeps logging while the laptop is off. Daylight saving is
-handled automatically. Works fine on a **private** repo.
+handled automatically. **Requires a public repo** (see *Why public* below).
 
 1. Create an empty repo at <https://github.com/new>. Do **not** add a README,
    `.gitignore`, or licence — this folder already has its own history.
@@ -56,59 +57,76 @@ handled automatically. Works fine on a **private** repo.
    samples and every run fails at the last step.
 
 4. Press **Sync cloud** in the GUI whenever you want the laptop's copy caught
-   up. It runs `git pull` and merges `data/cloud-log.csv` in — which is why a
-   private repo is fine: it reuses the git credentials you already have, so no
-   access token is ever stored in `config.json`.
+   up. It runs `git pull` and merges `data/cloud-log.csv` in.
+
+### One trigger starts a collector, not a sample
+
+This is the part that makes the 10-minute promise real. GitHub's cron is
+**best effort**, and for this repo it was badly so: a `*/10` schedule was only
+honoured about six times a day, roughly 90 minutes apart, at near-identical
+times each day. Since the endpoint only ever reports *right now*, every mark
+it missed was lost for good — which is why syncing never filled the gaps.
+
+So the model is inverted. A firing no longer means "take one sample"; it
+starts `cloud_run.py`, which **stays alive and polls the 10-minute grid
+itself** until the window closes. Cron now only has to land once a day
+instead of sixty times.
+
+| | Old | New |
+|---|---|---|
+| What a firing does | one sample, then exit | poll every 10 min until 5pm |
+| Firings needed per day | ~61 | 1 (with the cron as a backstop) |
+| Samples per weekday | ~6 in practice | ~61 |
+
+Details worth knowing:
+
+- **It polls on the wall clock** — samples land on :00, :10, :20 … however
+  late the run itself started, so they bin cleanly in the GUI.
+- **It commits every 3 polls**, so a runner that dies loses half an hour at
+  worst rather than the rest of the day. Expect ~20 commits per weekday.
+- **A job is capped at 6 hours** and the window is 10, so at 5h30m the
+  collector pushes, asks GitHub to start its successor via `workflow_dispatch`
+  (which is why the job needs `actions: write`), and exits. The `*/10` cron
+  stays on underneath: if a collector dies outright, the next firing starts a
+  fresh one, and the concurrency group keeps it to one at a time.
+- **The cron is now just an ignition source**, so it is scheduled early and
+  wide (`*/10 10-22 * * 1-5`) rather than precisely. A firing delayed by an
+  hour still gets a collector up before 7am; `cloud_run.py` then idles until
+  the real open and stops at the real close.
 
 ### Daylight saving is handled automatically
 
-GitHub cron is **always UTC with no DST support**, so no single cron expression
-can mean "7am–5pm campus time" year-round. Instead the workflow schedules the
-**union** of both windows — `*/10 11-21 * * 1-5`, i.e. 11:00–21:59 UTC, which
-covers 7am–5pm ET under both EDT and EST — and `in_window.py` decides at
-runtime whether each firing is genuinely in-window.
-
-`zoneinfo` carries the real DST rules, so this is correct through the
-2026-11-01 transition and every one after it, with **nothing to edit**. Verify
-it yourself any time:
+GitHub cron is **always UTC with no DST support**, so no cron expression can
+mean "7am–5pm campus time" year-round. `in_window.py` decides at runtime
+instead, and `zoneinfo` carries the real rules — correct through the
+2026-11-01 flip and every one after, with **nothing to edit**. Verify any time:
 
 ```bash
-python in_window.py --check     # 14 pinned cases, incl. both 2026/2027 flips
+python in_window.py --check     # 18 pinned cases, incl. both 2026/2027 flips
 ```
 
 To change the hours, edit `START_HOUR` / `END_HOUR` in `in_window.py`. Only
-widen the *cron* if you go outside 7am–5pm, since the cron is the outer bound.
+widen the *cron* if you move outside 6am–7pm, since it is the outer bound.
 
-### Actions minutes
+### Why public
 
-Weekdays only, so the worst case is a month with 22 weekdays:
+Keeping a collector alive for the 10-hour window costs ~600 Actions minutes a
+weekday, or ~13,200 a month. Public repos get **unlimited free Actions**;
+private ones get 2,000 free minutes, so the same setup would run out in about
+three days and then cost ~$90/month. There is nothing sensitive in here —
+public parking counts and your own code — so public is the cheap answer.
 
-| | Runs billed | Actually collect |
-|---|---|---|
-| Sep 2026 (EDT) | 1,452 | 1,320 |
-| Nov 2026 (DST flips) | 1,386 | 1,260 |
-| Jan 2027 (EST) | 1,386 | 1,260 |
+If you ever need it private again, the honest options are to accept ~6 samples
+a day, or move the collector to something with free reliable cron (Cloudflare
+Workers' free tier does this well, and `parking_core.sync` already has a
+`sync_mode: "url"` path built for pulling a published CSV).
 
-Against the 2,000-minute free tier for private repos, that leaves ~27% headroom.
+### Housekeeping
 
-Two things drive those numbers. GitHub bills each run rounded **up to a full
-minute** even though a poll takes seconds. And ~132 runs/month fire but skip
-immediately — the hour of the union window that is out-of-window under the
-current offset. Those skipped runs still cost a billed minute each; that is the
-price of automatic DST, and it is cheaper than the alternative of splitting the
-guard into its own job (which would bill a second minute on every *real* run).
-
-Public repos get unlimited free Actions, so none of this applies if you make the
-repo public.
-
-### Cron reliability
-
-Scheduled runs are **best-effort**: they often land several minutes late and can
-be skipped entirely under load, so expect roughly 10–20 minute spacing rather
-than a clean 10. GitHub also **disables scheduled workflows after 60 days of no
-repo activity** — push something occasionally, or re-enable it in the Actions
-tab. Neither hurts the analysis: every sample carries its own timestamp, and
-gaps are treated as missing rather than as zero.
+GitHub **disables scheduled workflows after 60 days of no repo activity**. The
+collector's own commits count, so this only bites over a long break — re-enable
+it in the Actions tab. The CSV grows by ~610 rows (~60 KB) per weekday; git
+deltas that well, but it is not forever-free.
 
 ## The GUI
 
@@ -141,7 +159,8 @@ python collect.py --import-url URL     # merge the cloud collector's CSV
 | `collect.py` | command-line collector, stdlib only |
 | `parking_core.py` | fetching, SQLite storage, import/export |
 | `analysis.py` | time-of-day binning and weekday averaging |
-| `in_window.py` | decides EDT vs EST for the cloud collector (`--check` self-tests) |
+| `cloud_run.py` | the long-running cloud collector — polls the 10-min grid, commits as it goes |
+| `in_window.py` | when the window is open, in real campus time (`--check` self-tests) |
 | `data/parking.db` | the SQLite store (all lots, all history) |
 | `Register-Task.ps1` | registers the 5-minute Windows task |
 | `Log-Parking.ps1` | the original CSV logger, superseded by `collect.py` |
@@ -150,7 +169,7 @@ python collect.py --import-url URL     # merge the cloud collector's CSV
 
 The endpoint needs no authentication and `robots.txt` does not exclude it, but
 it is someone else's server. The collectors identify themselves honestly in the
-User-Agent, poll at 5-minute intervals, and deliberately do **not** send the
+User-Agent, poll no faster than every 5 minutes, and deliberately do **not** send the
 `x-api-key` found in the page source — it is not required, and borrowing it is
 the one thing here that could read as circumventing an access control. If NC
 State ever asks you to stop, stop.
